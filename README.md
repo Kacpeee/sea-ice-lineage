@@ -1,150 +1,107 @@
-# Sea Ice Data Lineage — demo OpenLineage + Marquez
+# Sea Ice Data Lineage — OpenLineage + Marquez
 
-Mały, działający projekt pokazujący **data lineage** (rodowód danych) na prostym
-pipeline ETL. Pipeline przetwarza dane o zasięgu lodu morskiego, a przy okazji
-emituje zdarzenia **OpenLineage**, które zbieram i wizualizuję w **Marquezie**.
+Demonstracja **end-to-end data lineage** na pipelinie ETL: dane przechodzą przez
+kolejne transformacje, a każdy krok automatycznie raportuje swoje pochodzenie
+(źródła, wyjścia, schematy). Efektem jest klikalny graf pokazujący pełną drogę
+danych — od surowego pliku po zagregowaną tabelę wynikową.
 
-Efekt końcowy: klikalny graf pokazujący, skąd dane przyszły, jak były
-przekształcane i gdzie wylądowały.
+Projekt łączy trzy obszary:
+(pipeline ETL), metadane (lineage + schematy) i obserwowalność (śledzenie
+uruchomień i ich statusów).
+
+![Graf lineage w Marquezie](https://github.com/user-attachments/assets/5b5b6555-f975-42b1-8be3-5475e3a35a48)
+
+*Graf lineage w Marquezie: trzy kroki (`ingest → clean → aggregate`) połączone
+datasetami, ze schematem każdej tabeli i jego ewolucją wzdłuż pipeline'u.*
+
+---
+
+## Co projekt demonstruje
+
+- **Instrumentację pipeline'u standardem OpenLineage** — ręczna emisja zdarzeń
+  `START` / `COMPLETE` / `FAIL` z poziomu kodu, z poprawnym modelem Job / Run / Dataset.
+- **Modelowanie metadanych** — przepływ danych opisany jako relacje wejście→wyjście,
+  ze schematami kolumn (facet `schema`) i ich ewolucją na kolejnych etapach.
+- **ETL z naciskiem na jakość danych** — czyszczenie braków i wartości odstających,
+  typowanie, agregacja (pandas).
+- **Pracę z infrastrukturą w Dockerze** — lokalne uruchomienie backendu lineage
+  (Marquez: API + PostgreSQL + UI + OpenSearch) i diagnostyka z logów.
+
+---
+
+## Architektura
 
 ```
-raw_sea_ice.csv ──[ingest]──► staging.sea_ice_raw
-                                    │
-                              [clean]│
-                                    ▼
-                             staging.sea_ice_clean
-                                    │
-                          [aggregate]│
-                                    ▼
-                             marts.sea_ice_monthly
+  pipeline.py ──(zdarzenia OpenLineage / HTTP)──►  Marquez API ──►  PostgreSQL
+       │                                                │
+       │ produkuje pliki danych                    Marquez Web UI  (graf lineage)
+       ▼
+   data/*.csv, *.parquet
+```
+
+Pipeline emituje metadane *o* przepływie danych do API Marqueza; same dane
+(CSV/parquet) zapisuje na dysk. Marquez gromadzi zdarzenia i wizualizuje je jako graf.
+
+**Pipeline (3 kroki):**
+
+```
+raw_sea_ice.csv ──[ingest]──► staging.sea_ice_raw ──[clean]──► staging.sea_ice_clean ──[aggregate]──► marts.sea_ice_monthly
 ```
 
 ---
 
-## Pojęcia (3 klocki OpenLineage)
+## Model lineage (OpenLineage)
 
-| Pojęcie | Co to jest | W tym projekcie |
+| Pojęcie | Znaczenie | W projekcie |
 |---|---|---|
 | **Job** | krok przetwarzania | `ingest_sea_ice`, `clean_sea_ice`, `aggregate_sea_ice` |
-| **Run** | konkretne uruchomienie joba | jedno odpalenie `pipeline.py` (każdy job dostaje swój `runId`) |
-| **Dataset** | zbiór danych na wejściu/wyjściu | `raw_sea_ice.csv`, `staging.*`, `marts.*` |
+| **Run** | uruchomienie joba | jedno odpalenie pipeline'u (osobny `runId` na krok) |
+| **Dataset** | dane wej./wyj. | `raw_sea_ice.csv`, `staging.*`, `marts.*` |
+| **Facet** | metadane datasetu | `schema` — kolumny i typy |
 
-Każdy job emituje dwa **eventy**: `START` (zaczynam) i `COMPLETE` (skończyłem),
-mówiąc przy tym, jakie **Datasety** wziął na wejściu i jakie wyprodukował na
-wyjściu. Z tych eventów Marquez składa graf. Do datasetów doczepiamy też
-**facet `schema`** — listę kolumn z typami.
-
----
-
-## Wymagania
-
-- **Docker** + **Docker Compose** (do postawienia Marqueza)
-- **Python 3.8+**
-- Git
+Każdy krok raportuje, jakie datasety wziął na wejściu i jakie wyprodukował na
+wyjściu — z tych relacji Marquez odtwarza graf.
 
 ---
 
-## Krok 1 — Postaw Marquez (backend + UI)
+## Stack technologiczny
 
-Marquez to referencyjny serwer OpenLineage. Stawia się jednym skryptem
-(odpala w Dockerze bazę Postgres + API + web UI):
+**Python** (pandas, NumPy) · **OpenLineage** (`openlineage-python`) ·
+**Marquez** · **PostgreSQL** · **Docker / Docker Compose**
+
+---
+
+## Struktura projektu
+
+| Plik | Zawartość |
+|---|---|
+| `pipeline.py` | Pipeline ETL + emisja zdarzeń OpenLineage |
+| `requirements.txt` | Zależności (przypięte wersje) |
+| `NOTATKI_konfiguracja.md` | Dokumentacja konfiguracji i rozwiązanych problemów |
+| `WYJASNIENIE_kodu.md` | Omówienie kodu sekcja po sekcji |
+
+---
+
+## Uruchomienie
 
 ```bash
+# 1. Backend lineage (Marquez w Dockerze)
 git clone https://github.com/MarquezProject/marquez.git
-cd marquez
-./docker/up.sh
-```
+cd marquez && ./docker/up.sh          # UI: localhost:3000 · API: localhost:5000
 
-Po chwili:
-- **Web UI:** http://localhost:3000
-- **API:** http://localhost:5000  ← tu pipeline wysyła eventy
-
-> Najczęstszy problem na tym etapie to zajęte porty albo niewstający Docker.
-> Sprawdź to **jako pierwsze**, zanim zabierzesz się za skrypt.
-
----
-
-## Krok 2 — Środowisko Pythona
-
-```bash
-cd ..              # wróć z katalogu marquez do katalogu projektu
-python -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\activate
+# 2. Pipeline
 pip install -r requirements.txt
+python pipeline.py                    # wysyła lineage do Marqueza
 ```
+
+Tryb testowy bez Marqueza (zdarzenia na konsolę): `OPENLINEAGE_TRANSPORT=console python pipeline.py`.
+Graf: `localhost:3000` → namespace `sea_ice`.
 
 ---
 
-## Krok 3 — Uruchom pipeline
+## Możliwe rozszerzenia
 
-**Najpierw test bez Marqueza** (eventy lecą na konsolę — sprawdzasz, że skrypt
-w ogóle działa):
-
-```bash
-OPENLINEAGE_TRANSPORT=console python pipeline.py
-```
-
-**Potem na serio, z Marquezem** (domyślnie wysyła na http://localhost:5000):
-
-```bash
-python pipeline.py
-```
-
-Oczekiwany wynik:
-
-```
-Uruchamiam pipeline z emisją lineage do OpenLineage...
-  [ingest_sea_ice] OK
-  [clean_sea_ice] OK
-  [aggregate_sea_ice] OK
-Gotowe. Wynik: 120 wierszy miesięcznych w data/sea_ice_monthly.csv
-```
-
----
-
-## Krok 4 — Zobacz graf
-
-Wejdź na **http://localhost:3000**, w lewym górnym rogu wybierz namespace
-**`sea_ice`**. Zobaczysz trzy joby połączone datasetami — to jest Twój lineage.
-Kliknij dataset, żeby zobaczyć jego schemat (facet `schema`).
-
-> Tutaj zrób **screenshot** grafu i wrzuć go do README (sekcja niżej) — to
-> najmocniejszy element do pokazania na rozmowie.
-
-```
-<!-- ![Graf lineage w Marquezie](docs/lineage_graph.png) -->
-```
-
----
-
-## Jak to jest zbudowane (pliki)
-
-- `pipeline.py` — całość: generowanie surowych danych, ETL w pandas
-  (`ingest` → `clean` → `aggregate`) oraz emisja eventów OpenLineage.
-- `requirements.txt` — zależności (przypięte wersje).
-- `data/` — pliki tworzone w trakcie (surowe + pośrednie + wynik).
-
-Logika emisji jest w trzech miejscach `pipeline.py`:
-- `build_client()` — wybór transportu (console do testów / http do Marqueza),
-- `emit()` — wysyłka pojedynczego `RunEvent`,
-- `run_job()` — opakowanie kroku: `START` → praca → `COMPLETE` (lub `FAIL`).
-
----
-
-## Po co to w ogóle — kontekst (governance)
-
-Data lineage to fundament **data governance**: jak ktoś pyta „skąd ta liczba?”
-albo coś się zepsuje w pipeline, lineage pozwala prześledzić całą drogę danych
-wstecz — to buduje zaufanie do danych. OpenLineage to **otwarty standard**
-opisywania tego, dzięki czemu różne narzędzia (Airflow, dbt, Spark) mogą
-raportować lineage w jeden, spójny sposób, a katalogi takie jak **OpenMetadata**
-mogą go pokazywać.
-
----
-
-## Pomysły na rozszerzenie (jeśli będzie czas)
-
-- Podpiąć pipeline pod **Airflow** z providerem OpenLineage (lineage zbierany
-  automatycznie z DAG-a) zamiast emisji ręcznej.
-- Dodać facet **dataQuality** (np. liczba odrzuconych wierszy w `clean`).
-- Dodać prawdziwe dane (np. NSIDC Sea Ice Index) zamiast syntetycznych.
+- Automatyczne zbieranie lineage przez **Airflow** + provider OpenLineage (zamiast emisji ręcznej).
+- Facet **dataQuality** (np. liczba odrzuconych wierszy na etapie czyszczenia).
+- Realne dane (NSIDC Sea Ice Index) zamiast syntetycznych.
+- Onboarding metadanych do **OpenMetadata** jako katalogu danych.
